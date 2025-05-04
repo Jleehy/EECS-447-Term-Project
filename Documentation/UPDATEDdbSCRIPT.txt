@@ -1,0 +1,474 @@
+-- ----------------------------
+-- Complete Media Library Schema and Reports
+-- ----------------------------
+
+-- 1. Core Media and Metadata Tables
+CREATE TABLE Work (
+    MatID INT AUTO_INCREMENT PRIMARY KEY,
+    Title VARCHAR(255) NOT NULL,
+    Year INT,
+    Category VARCHAR(50) NOT NULL,           -- e.g. Book, Digital Media, Magazine, Art, Mathematics
+    Borrowing_Fee DECIMAL(6,2) NOT NULL
+);
+
+CREATE TABLE Work_of_Art (
+    MatID INT PRIMARY KEY,
+    State_of_Repair VARCHAR(100),
+    Date_Restored DATE,
+    FOREIGN KEY (MatID) REFERENCES Work(MatID)
+);
+
+CREATE TABLE Ancient_Mathematics (
+    MatID INT PRIMARY KEY,
+    Date_Proved VARCHAR(20),
+    Focus VARCHAR(255),
+    FOREIGN KEY (MatID) REFERENCES Work(MatID)
+);
+
+CREATE TABLE Literature_Piece (
+    MatID INT PRIMARY KEY,
+    Genre VARCHAR(100),
+    Substrate VARCHAR(100),       -- e.g. Parchment, Scroll, Digital
+    FOREIGN KEY (MatID) REFERENCES Work(MatID)
+);
+
+-- 2. Creators and Relationships
+CREATE TABLE Creator (
+    CreID INT AUTO_INCREMENT PRIMARY KEY,
+    First_Name VARCHAR(100),
+    Last_Name VARCHAR(100),
+    Phone_Number VARCHAR(15),
+    Email VARCHAR(100)
+);
+
+CREATE TABLE Creates (
+    CreID INT NOT NULL,
+    MatID INT NOT NULL,
+    PRIMARY KEY (CreID, MatID),
+    FOREIGN KEY (CreID) REFERENCES Creator(CreID),
+    FOREIGN KEY (MatID) REFERENCES Work(MatID)
+);
+
+-- 3. Physical/Digital Copies
+CREATE TABLE Copy (
+    CopyID INT AUTO_INCREMENT PRIMARY KEY,
+    MatID INT NOT NULL,
+    Available BOOLEAN NOT NULL DEFAULT TRUE,
+    Last_Borrowed_Date DATETIME NULL,
+    FOREIGN KEY (MatID) REFERENCES Work(MatID)
+);
+
+-- 4. Clients, Tiers, and Administrators
+CREATE TABLE Account_Tier_Limits (
+    Tier_Name VARCHAR(50) PRIMARY KEY,
+    Max_Borrowable INT NOT NULL
+);
+
+CREATE TABLE Client (
+    AcctID INT AUTO_INCREMENT PRIMARY KEY,
+    First_Name VARCHAR(100) NOT NULL,
+    Last_Name VARCHAR(100) NOT NULL,
+    Phone_Number VARCHAR(15),
+    Email VARCHAR(100),
+    Account_Tier VARCHAR(50) NOT NULL,
+    Account_Age INT DEFAULT 0,
+    Current_Loans INT DEFAULT 0,
+    Total_Overdue_Returns INT DEFAULT 0,
+    Total_Revenue DECIMAL(10,2) DEFAULT 0.00,
+    FOREIGN KEY (Account_Tier) REFERENCES Account_Tier_Limits(Tier_Name)
+);
+
+CREATE TABLE Administrator (
+    AdmID INT AUTO_INCREMENT PRIMARY KEY,
+    First_Name VARCHAR(100),
+    Last_Name VARCHAR(100),
+    Age INT,
+    Phone_Number VARCHAR(15),
+    Email VARCHAR(100),
+    Activity_Status VARCHAR(50),     -- e.g. Active, Inactive
+    Permissions VARCHAR(100)
+);
+
+-- 5. Fine Rates (by tier or category)
+CREATE TABLE Fine_Rate (
+    RateID INT AUTO_INCREMENT PRIMARY KEY,
+    Applies_To VARCHAR(50) NOT NULL,    -- e.g. Global, Student, Senior, Book, Magazine
+    Daily_Rate DECIMAL(5,2) NOT NULL
+);
+
+-- 6. Loans and Reservations
+CREATE TABLE Loan (
+    LoanID INT AUTO_INCREMENT PRIMARY KEY,
+    CopyID INT NOT NULL,
+    AcctID INT NOT NULL,
+    AdmID INT NOT NULL,
+    Loan_Date DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    Due_Date DATETIME NOT NULL,
+    Return_Date DATETIME NULL,
+    FOREIGN KEY (CopyID) REFERENCES Copy(CopyID),
+    FOREIGN KEY (AcctID) REFERENCES Client(AcctID),
+    FOREIGN KEY (AdmID) REFERENCES Administrator(AdmID)
+);
+
+CREATE TABLE Reservation (
+    ReservationID INT AUTO_INCREMENT PRIMARY KEY,
+    MatID INT NOT NULL,
+    AcctID INT NOT NULL,
+    Reservation_Date DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    Status VARCHAR(20) NOT NULL DEFAULT 'Active',   -- Active, Fulfilled, Cancelled
+    Queue_Position INT NOT NULL,
+    FOREIGN KEY (MatID) REFERENCES Work(MatID),
+    FOREIGN KEY (AcctID) REFERENCES Client(AcctID)
+);
+
+-- 7. Genre count per client (for tracking popularity)
+CREATE TABLE Client_Genre_Count (
+    AcctID INT NOT NULL,
+    Genre VARCHAR(100) NOT NULL,
+    Total_Checked_Out INT DEFAULT 0,
+    PRIMARY KEY (AcctID, Genre),
+    FOREIGN KEY (AcctID) REFERENCES Client(AcctID)
+);
+
+-- 8. Transaction log for audit
+CREATE TABLE Transaction_Log (
+    TransID INT AUTO_INCREMENT PRIMARY KEY,
+    CopyID INT NOT NULL,
+    AcctID INT NOT NULL,
+    AdmID INT NOT NULL,
+    Trans_Type ENUM('Loan','Return') NOT NULL,
+    Trans_Time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (CopyID) REFERENCES Copy(CopyID),
+    FOREIGN KEY (AcctID) REFERENCES Client(AcctID),
+    FOREIGN KEY (AdmID) REFERENCES Administrator(AdmID)
+);
+
+
+-- 10. Reporting Views
+-- a) Total fines per client
+CREATE VIEW Client_Fines AS
+SELECT
+    c.AcctID,
+    CONCAT(c.First_Name,' ',c.Last_Name) AS Client_Name,
+    SUM(
+      CASE
+        WHEN l.Return_Date IS NULL AND l.Due_Date < CURRENT_TIMESTAMP
+          THEN DATEDIFF(CURRENT_TIMESTAMP, l.Due_Date) * fr.Daily_Rate
+        WHEN l.Return_Date > l.Due_Date
+          THEN DATEDIFF(l.Return_Date, l.Due_Date) * fr.Daily_Rate
+        ELSE 0 END
+    ) AS Total_Fines
+FROM Loan l
+JOIN Copy cp ON cp.CopyID = l.CopyID
+JOIN Work w ON w.MatID = cp.MatID
+JOIN Client c ON c.AcctID = l.AcctID
+LEFT JOIN Fine_Rate fr ON fr.Applies_To = c.Account_Tier
+  OR fr.Applies_To = w.Category
+GROUP BY c.AcctID;
+
+-- b) Books due in next 7 days
+CREATE VIEW Due_Next_7_Days AS
+SELECT
+    l.LoanID,
+    w.Title,
+    CONCAT(c.First_Name,' ',c.Last_Name) AS Borrower,
+    l.Due_Date
+FROM Loan l
+JOIN Copy cp ON cp.CopyID = l.CopyID
+JOIN Work w ON w.MatID = cp.MatID
+JOIN Client c ON c.AcctID = l.AcctID
+WHERE l.Return_Date IS NULL
+  AND l.Due_Date BETWEEN CURRENT_TIMESTAMP AND DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 7 DAY)
+ORDER BY l.Due_Date;
+
+-- c) Overdue members and their overdue items
+CREATE VIEW Overdue_Members AS
+SELECT
+    c.AcctID,
+    CONCAT(c.First_Name,' ',c.Last_Name) AS Member,
+    w.Title,
+    DATEDIFF(CURRENT_TIMESTAMP, l.Due_Date) AS Days_Overdue,
+    DATEDIFF(CURRENT_TIMESTAMP, l.Due_Date) * COALESCE(
+        (SELECT Daily_Rate FROM Fine_Rate WHERE Applies_To = c.Account_Tier),
+        (SELECT Daily_Rate FROM Fine_Rate WHERE Applies_To = 'Global')
+    ) AS Accrued_Fee
+FROM Loan l
+JOIN Copy cp ON cp.CopyID = l.CopyID
+JOIN Work w ON w.MatID = cp.MatID
+JOIN Client c ON c.AcctID = l.AcctID
+WHERE l.Return_Date IS NULL
+  AND l.Due_Date < CURRENT_TIMESTAMP;
+
+-- d) Avg loan duration by genre
+CREATE VIEW Avg_Loan_By_Genre AS
+SELECT
+    lp.Genre,
+    AVG(DATEDIFF(
+      COALESCE(l.Return_Date, CURRENT_TIMESTAMP),
+      l.Loan_Date
+    )) AS Avg_Days_On_Loan
+FROM Loan l
+JOIN Copy cp ON cp.CopyID = l.CopyID
+JOIN Literature_Piece lp ON lp.MatID = cp.MatID
+GROUP BY lp.Genre;
+
+-- e) Top author past month
+CREATE VIEW Top_Author_Last_Month AS
+SELECT
+    cr.CreID,
+    CONCAT(cr.First_Name,' ',cr.Last_Name) AS Author,
+    COUNT(*) AS Times_Borrowed
+FROM Loan l
+JOIN Copy cp ON cp.CopyID = l.CopyID
+JOIN Creates cs ON cs.MatID = cp.MatID
+JOIN Creator cr ON cr.CreID = cs.CreID
+WHERE l.Loan_Date >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 1 MONTH)
+GROUP BY cr.CreID
+ORDER BY Times_Borrowed DESC
+LIMIT 1;
+
+-- f) Fees collected by tier last month
+CREATE VIEW Fees_By_Tier_Last_Month AS
+SELECT
+    c.Account_Tier,
+    SUM(w.Borrowing_Fee) AS Total_Fees_Collected
+FROM Loan l
+JOIN Copy cp ON cp.CopyID = l.CopyID
+JOIN Work w ON w.MatID = cp.MatID
+JOIN Client c ON c.AcctID = l.AcctID
+WHERE l.Loan_Date >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 1 MONTH)
+GROUP BY c.Account_Tier;
+
+-- g) Members over their limit
+CREATE VIEW Members_Over_Limit AS
+SELECT
+    c.AcctID,
+    CONCAT(c.First_Name,' ',c.Last_Name) AS Member,
+    c.Account_Tier,
+    c.Current_Loans,
+    a.Max_Borrowable
+FROM Client c
+JOIN Account_Tier_Limits a ON a.Tier_Name = c.Account_Tier
+WHERE c.Current_Loans > a.Max_Borrowable;
+
+-- h) Most borrowed items by client type
+CREATE VIEW Most_Borrowed_By_Tier AS
+SELECT
+    c.Account_Tier,
+    w.Title,
+    COUNT(*) AS Times_Borrowed
+FROM Loan l
+JOIN Copy cp ON cp.CopyID = l.CopyID
+JOIN Work w ON w.MatID = cp.MatID
+JOIN Client c ON c.AcctID = l.AcctID
+GROUP BY c.Account_Tier, w.Title
+ORDER BY c.Account_Tier, Times_Borrowed DESC;
+
+-- i) Clients never late
+CREATE VIEW Always_On_Time_Clients AS
+SELECT
+    c.AcctID,
+    CONCAT(c.First_Name,' ',c.Last_Name) AS Client_Name
+FROM Client c
+WHERE NOT EXISTS (
+    SELECT 1 FROM Loan l
+    WHERE l.AcctID = c.AcctID
+      AND ((l.Return_Date > l.Due_Date)
+           OR (l.Return_Date IS NULL AND l.Due_Date < CURRENT_TIMESTAMP))
+);
+
+-- j) Avg loan time overall
+CREATE VIEW Avg_Loan_Time AS
+SELECT
+    AVG(DATEDIFF(
+      COALESCE(l.Return_Date, CURRENT_TIMESTAMP),
+      l.Loan_Date
+    )) AS Overall_Avg_Days_On_Loan
+FROM Loan l;
+
+-- k) Monthly summary
+CREATE VIEW Monthly_Summary AS
+SELECT
+    COUNT(*) AS Total_Items_Loaned,
+    SUM(w.Borrowing_Fee) AS Total_Fees_Collected,
+    (SELECT w2.Title
+     FROM Loan l2
+     JOIN Copy cp2 ON cp2.CopyID = l2.CopyID
+     JOIN Work w2 ON w2.MatID = cp2.MatID
+     WHERE l2.Loan_Date >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 1 MONTH)
+     GROUP BY w2.Title
+     ORDER BY COUNT(*) DESC
+     LIMIT 1
+    ) AS Most_Popular_Item
+FROM Loan l
+JOIN Copy cp ON cp.CopyID = l.CopyID
+JOIN Work w ON w.MatID = cp.MatID
+WHERE l.Loan_Date >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 1 MONTH);
+
+-- l) Inventory status
+CREATE VIEW Inventory_Status AS
+SELECT
+    w.MatID,
+    w.Title,
+    cp.CopyID,
+    cp.Available,
+    cp.Last_Borrowed_Date
+FROM Work w
+JOIN Copy cp ON cp.MatID = w.MatID;
+
+-- m) Stale items
+CREATE VIEW Stale_Items AS
+SELECT
+    w.MatID,
+    w.Title,
+    MAX(l.Loan_Date) AS Last_Borrowed
+FROM Work w
+JOIN Copy cp ON cp.MatID = w.MatID
+LEFT JOIN Loan l ON l.CopyID = cp.CopyID
+GROUP BY w.MatID
+HAVING Last_Borrowed IS NULL OR Last_Borrowed < DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 6 MONTH);
+
+-- n) Revenue by tier and category last month
+CREATE VIEW Revenue_By_Tier_Category AS
+SELECT
+    c.Account_Tier,
+    w.Category,
+    SUM(w.Borrowing_Fee) AS Revenue_Collected
+FROM Loan l
+JOIN Copy cp ON cp.CopyID = l.CopyID
+JOIN Work w ON w.MatID = cp.MatID
+JOIN Client c ON c.AcctID = l.AcctID
+WHERE l.Loan_Date >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 1 MONTH)
+GROUP BY c.Account_Tier, w.Category;
+
+
+-- data
+
+
+-- ----------------------------
+-- Population Script for Ancient Media Library
+-- ----------------------------
+
+-- 1. Seed Account Tier Limits and Fine Rates
+INSERT INTO Account_Tier_Limits (Tier_Name, Max_Borrowable) VALUES
+  ('Gold', 10),
+  ('Silver', 5),
+  ('Bronze', 2);
+
+INSERT INTO Fine_Rate (Applies_To, Daily_Rate) VALUES
+  ('Gold', .25),
+  ('Silver', .50),
+  ('Bronze', .75),
+  ('Global', .25);
+-- 2. Seed Works
+INSERT INTO Work (MatID, Title, Year, Category, Borrowing_Fee) VALUES
+  (1, 'The Great Vase',                  500,   'Art',           2.50),
+  (2, 'On the Heavens',                  -350,  'Mathematics',   3.00),
+  (3, 'Epic of Gilgamesh',               -2100, 'Literature',    1.75),
+  (4, 'The Republic',                    -380,  'Literature',    2.00),
+  (5, 'Rhind Mathematical Papyrus',      -1550, 'Mathematics',   2.25),
+  (6, 'The Iliad',                       -762,  'Literature',    1.50),
+  (7, 'The Discobolus',                  -450,  'Art',           3.25),
+  (8, 'Elements',                        -300,  'Mathematics',   2.75),
+  (9, 'Code of Hammurabi',               -1754, 'Literature',    2.00),
+  (10,'Ancient Egyptian Papyrus Maps',   -1200, 'Art',           3.50),
+  (11,'Roman Mosaic Fragment',           100,   'Art',           2.80),
+  (12,'Sanskrit Vedic Hymns',            -1500, 'Literature',    2.10);
+
+-- 3. Seed Specialized Tables
+INSERT INTO Work_of_Art (MatID, State_of_Repair, Date_Restored) VALUES
+  (1, 'Excellent', '2018-06-15'),
+  (7, 'Good',      '2015-04-10'),
+  (9, 'Fair',      '2020-01-20'),
+  (11,'Restored',  '2019-09-01');
+
+INSERT INTO Ancient_Mathematics (MatID, Date_Proved, Focus) VALUES
+  (2, '0340-01-01', 'Geocentrism and cosmology'),
+  (5, '1550-01-01', 'Arithmetic and geometry'),
+  (8, '0300-01-01', 'Euclidean geometry');
+
+INSERT INTO Literature_Piece (MatID, Genre, Substrate) VALUES
+  (3, 'Epic Poetry', 'Clay Tablets'),
+  (4, 'Philosophy',  'Parchment'),
+  (6, 'Epic Poetry', 'Scroll'),
+  (9, 'Legal Text',  'Stone'),
+  (12,'Hymnal',      'Palm Leaf');
+
+-- 4. Seed Creators and Relationships
+INSERT INTO Creator (CreID, First_Name, Last_Name, Phone_Number, Email) VALUES
+  (1, 'Unknown',          'Sumerian',         '000-000-0000', 'sumerian@example.com'),
+  (2, 'Aristotle',        '',                 '000-000-0001', 'aristotle@example.com'),
+  (3, 'Unknown',          'Artist',           '000-000-0002', 'vase@example.com'),
+  (4, 'Plato',            '',                 '000-000-0003', 'plato@example.com'),
+  (5, 'Unknown',          'Egyptian Scribe',  '000-000-0004', 'scribe@example.com'),
+  (6, 'Homer',            '',                 '000-000-0005', 'homer@example.com'),
+  (7, 'Myron',            '',                 '000-000-0006', 'myron@example.com'),
+  (8, 'Euclid',           '',                 '000-000-0007', 'euclid@example.com'),
+  (9, 'Hammurabi',        '',                 '000-000-0008', 'hammurabi@example.com');
+
+INSERT INTO Creates (CreID, MatID) VALUES
+  (1,3), (2,2), (3,1), (4,4), (5,5), (6,6), (7,7), (8,8), (9,9);
+
+-- 5. Seed Copies
+INSERT INTO Copy (CopyID, MatID, Available, Last_Borrowed_Date) VALUES
+  (1, 1, TRUE,  NULL),
+  (2, 2, TRUE,  '2025-04-24'),
+  (3, 3, FALSE, '2025-04-01'),
+  (4, 4, TRUE,  NULL),
+  (5, 5, TRUE,  '2025-04-19'),
+  (6, 6, TRUE, '2025-03-20'),
+  (7, 7, TRUE,  NULL),
+  (8, 8, FALSE, '2025-04-29'),
+  (9, 9, TRUE,  NULL),
+  (10,10,TRUE,  '2025-05-04'),
+  (11,11,TRUE,  NULL),
+  (12,12,TRUE,  NULL);
+
+-- 6. Seed Clients
+INSERT INTO Client (AcctID, First_Name, Last_Name, Phone_Number, Email, Account_Tier, Account_Age, Current_Loans, Total_Overdue_Returns, Total_Revenue) VALUES
+  (101, 'Alice',  'Smith',  '123-456-7890', 'alice@example.com',  'Gold',    5,  2,  0,  5.00),
+  (102, 'Bob',    'Johnson','987-654-3210', 'bob@example.com',    'Silver',  2,  1,  1,  1.50),
+  (103, 'Clara',  'Davis',  '321-654-0987', 'clara@example.com',  'Bronze',  1,  1,  0,  0.00),
+  (104, 'Darius', 'Emet',   '555-123-4567', 'darius@example.com', 'Gold', 3,  0,  0,  0.00),
+  (105, 'Seneca', 'Philo',  '444-987-6543', 'seneca@example.com', 'Silver',  10, 0,  0,  0.00);
+
+-- 7. Seed Administrators
+INSERT INTO Administrator (AdmID, First_Name, Last_Name, Age, Phone_Number, Email, Activity_Status, Permissions) VALUES
+  (201, 'Eve',     'Admin', 35, '555-555-5555', 'eve.admin@example.com',    'Active',   'Full'),
+  (202, 'Charlie', 'Admin', 42, '444-444-4444', 'charlie.admin@example.com','Inactive', 'View Only');
+
+-- 8. Seed Loans
+INSERT INTO Loan (CopyID, AcctID, AdmID, Loan_Date, Due_Date, Return_Date, Late_Fee) VALUES
+  (3,  101, 201, '2025-04-01', '2025-04-15', NULL),
+  (6,  102, 202, '2025-03-20', '2025-04-03', '2025-04-02'),
+  (2,  101, 202, '2025-04-10', '2025-04-24', NULL),
+  (5,  103, 201, '2025-04-05', '2025-04-19', NULL),
+  (8,  104, 201, '2025-04-15', '2025-04-29', NULL),
+  (10, 105, 202, '2025-04-20', '2025-05-04', NULL);
+
+-- 9. Seed Reservations (queue positions assigned sequentially)
+INSERT INTO Reservation (MatID, AcctID, Reservation_Date, Status, Queue_Position) VALUES
+  (2, 101, '2025-04-20 10:00:00', 'Active', 1),
+  (2, 102, '2025-04-21 11:30:00', 'Active', 2),
+  (5, 103, '2025-04-22 09:15:00', 'Active', 1),
+  (9, 104, '2025-04-25 08:00:00', 'Active', 1);
+
+-- 10. Seed Transaction Log
+INSERT INTO Transaction_Log (CopyID, AcctID, AdmID, Trans_Type, Trans_Time, Late_Fee) VALUES
+  (3, 101, 201, 'Loan',   '2025-04-01 09:00:00'),
+  (6, 102, 202, 'Loan',   '2025-03-20 14:30:00'),
+  (6, 102, 202, 'Return', '2025-04-02 16:45:00'),
+  (2, 101, 202, 'Loan',   '2025-04-10 08:20:00'),
+  (5, 103, 201, 'Loan',   '2025-04-05 12:00:00'),
+  (8, 104, 201, 'Loan',   '2025-04-29 12:00:00'),
+  (10, 105, 202, 'Loan',  '2025-04-20 12:00:00');
+
+
+-- 11. Seed Client Genre Counts
+INSERT INTO Client_Genre_Count (AcctID, Genre, Total_Checked_Out) VALUES
+  (101, 'Epic Poetry',     2),
+  (101, 'Philosophy',      1),
+  (102, 'Mathematics',     1),
+  (103, 'Epic Poetry',     1);
+
+-- End of population script
